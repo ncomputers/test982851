@@ -4,23 +4,14 @@ import easyocr
 import numpy as np
 import time
 import platform
-import threading
-from difflib import SequenceMatcher
-import firebase_admin
-from firebase_admin import credentials, db
-import os
 import json
+import threading
+import os
+from difflib import SequenceMatcher
 
-# === Firebase Setup (from local JSON file) ===
+# === Setup ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-cred_path = os.path.join(BASE_DIR, "testapi.json")
-with open(cred_path, "r") as f:
-    firebase_cred_dict = json.load(f)
-
-cred = credentials.Certificate(firebase_cred_dict)
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://alg1-457f6-default-rtdb.firebaseio.com/',
-})
+OUTPUT_FILE = os.path.join(BASE_DIR, "output.json")
 
 # === GUI Check ===
 DISPLAY_GUI = True
@@ -83,7 +74,7 @@ DEMAND_ZONE_KEYWORDS = ["demand zone", "dem zone", "d zone", "dem zo", "dmd zone
 def yt_main_loop():
     prev_aggregated = None
     first_signal_set = False
-    last_known_signal = {"text": "", "price": "AUTO", "coordinates": "X:Y"}
+    last_known_signal = {"text": "", "price": "", "coordinates": ""}
 
     while True:
         try:
@@ -117,37 +108,64 @@ def yt_main_loop():
 
                     if is_trading_signal(lower_text):
                         all_signals.append((x1, y1, text))
+                    elif any(fuzzy_match(lower_text, kw) for kw in SUPPLY_ZONE_KEYWORDS):
+                        pass
+                    elif any(fuzzy_match(lower_text, kw) for kw in DEMAND_ZONE_KEYWORDS):
+                        pass
 
-                last_signal_data = {"text": "", "price": "AUTO", "coordinates": "X:Y"}
+                last_signal_data = {"text": "", "price": "", "coordinates": ""}
 
                 if not first_signal_set and all_signals:
                     all_signals.sort(key=lambda s: s[0], reverse=True)
                     _, _, rtext = all_signals[0]
-                    last_signal_data = {"text": rtext, "price": "AUTO", "coordinates": "X:Y"}
+                    last_signal_data = {
+                        "text": rtext,
+                        "price": "",
+                        "coordinates": ""
+                    }
                     first_signal_set = True
+
                 elif all_signals:
                     all_signals.sort(key=lambda s: s[0], reverse=True)
                     _, _, rtext = all_signals[0]
-                    last_signal_data = {"text": rtext, "price": "AUTO", "coordinates": "X:Y"}
+                    last_signal_data = {
+                        "text": rtext,
+                        "price": "",
+                        "coordinates": ""
+                    }
 
+                # Update only if new signal
                 if last_signal_data.get("text"):
                     last_known_signal = last_signal_data
 
+                # Zones are forced blank
+                supply_zone_data = {"min": "", "max": ""}
+                demand_zone_data = {"min": "", "max": ""}
+
                 aggregated = {
-                    "last_signal": last_known_signal,
-                    "supply_zone": {"min": "AUTO", "max": "AUTO"},
-                    "demand_zone": {"min": "AUTO", "max": "AUTO"}
+                    "last_signal": {
+                        "text": last_known_signal.get("text", ""),
+                        "price": "",
+                        "coordinates": ""
+                    },
+                    "supply_zone": supply_zone_data,
+                    "demand_zone": demand_zone_data
                 }
 
+                # ✅ Write to local JSON only on change
                 if aggregated != prev_aggregated:
                     try:
-                        db.reference("signal_MAIN").set(aggregated)
-                        db.reference("signal").set(aggregated)
-                        print("✅ Updated Firebase:", aggregated)
+                        with open(OUTPUT_FILE, "w") as f:
+                            json.dump(aggregated, f, indent=4)
+
+                        print("✅ Updated Signal:")
+                        print(json.dumps(aggregated, indent=4))
+
                         prev_aggregated = aggregated
                     except Exception as e:
-                        print("❌ Firebase update error:", e)
+                        print("❌ Error writing to JSON:", e)
 
+                # GUI display
                 if DISPLAY_GUI:
                     disp_frame = cv2.resize(frame, (1366, 720))
                     cv2.imshow("YouTube Live Stream - Signal Detection", disp_frame)
@@ -168,6 +186,12 @@ def yt_main_loop():
             if 'stream' in locals():
                 stream.release()
             cv2.destroyAllWindows()
+
+def run_in_thread():
+    t = threading.Thread(target=yt_main_loop, name="YouTubeOCR")
+    t.daemon = True
+    t.start()
+    return t
 
 if __name__ == "__main__":
     yt_main_loop()
