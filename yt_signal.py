@@ -4,16 +4,20 @@ import easyocr
 import numpy as np
 import time
 import platform
+import redis
 import json
-import threading
-import os
 from difflib import SequenceMatcher
+import threading
+import torch
 
-# === Setup ===
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(BASE_DIR, "output.json")
+# Check for CUDA4
+use_cuda = torch.cuda.is_available()
+print("CUDA is available, using GPU acceleration for OCR." if use_cuda else "CUDA not available, using CPU.")
 
-# === GUI Check ===
+# Redis connection
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+# GUI check
 DISPLAY_GUI = True
 if platform.system().lower() in ["linux", "darwin"]:
     DISPLAY_GUI = False
@@ -31,13 +35,12 @@ if not test_imshow():
     print("cv2.imshow not supported. Disabling GUI.")
     DISPLAY_GUI = False
 
-# === YouTube URL ===
+# YouTube URL
 url = "https://www.youtube.com/live/jkP1Sw7M2iU"
 
-# === OCR Reader ===
-reader = easyocr.Reader(['en'], gpu=False)
+# OCR reader
+reader = easyocr.Reader(['en'], gpu=use_cuda)
 
-# === Helper Classes ===
 class YouTubeStream:
     def __init__(self, url):
         self.url = url
@@ -70,12 +73,12 @@ def fuzzy_match(text, keyword, threshold=0.7):
 SUPPLY_ZONE_KEYWORDS = ["supply zone", "sup zone", "suply zone", "supply zo", "sup zo"]
 DEMAND_ZONE_KEYWORDS = ["demand zone", "dem zone", "d zone", "dem zo", "dmd zone"]
 
-# === Main Loop ===
 def yt_main_loop():
     prev_aggregated = None
     first_signal_set = False
-    last_known_signal = {"text": "", "price": "", "coordinates": ""}
 
+    last_known_signal = {"text": "", "price": "", "coordinates": ""}
+    
     while True:
         try:
             stream = YouTubeStream(url)
@@ -98,8 +101,9 @@ def yt_main_loop():
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 results = reader.readtext(gray)
 
+                recognized_signals = []
                 all_signals = []
-
+                
                 for (bbox, text, prob) in results:
                     (tl, _, br, _) = bbox
                     x1, y1 = map(int, tl)
@@ -108,10 +112,11 @@ def yt_main_loop():
 
                     if is_trading_signal(lower_text):
                         all_signals.append((x1, y1, text))
+
                     elif any(fuzzy_match(lower_text, kw) for kw in SUPPLY_ZONE_KEYWORDS):
-                        pass
+                        pass  # ignored: zone detection disabled
                     elif any(fuzzy_match(lower_text, kw) for kw in DEMAND_ZONE_KEYWORDS):
-                        pass
+                        pass  # ignored: zone detection disabled
 
                 last_signal_data = {"text": "", "price": "", "coordinates": ""}
 
@@ -138,7 +143,7 @@ def yt_main_loop():
                 if last_signal_data.get("text"):
                     last_known_signal = last_signal_data
 
-                # Zones are forced blank
+                # Force all zones to be blank
                 supply_zone_data = {"min": "", "max": ""}
                 demand_zone_data = {"min": "", "max": ""}
 
@@ -152,20 +157,15 @@ def yt_main_loop():
                     "demand_zone": demand_zone_data
                 }
 
-                # ✅ Write to local JSON only on change
                 if aggregated != prev_aggregated:
                     try:
-                        with open(OUTPUT_FILE, "w") as f:
-                            json.dump(aggregated, f, indent=4)
-
-                        print("✅ Updated Signal:")
-                        print(json.dumps(aggregated, indent=4))
-
+                        r.set("signal_MAIN", json.dumps(aggregated))
+                        r.set("signal", json.dumps(aggregated))
+                        print("Updated Redis:", aggregated)
                         prev_aggregated = aggregated
                     except Exception as e:
-                        print("❌ Error writing to JSON:", e)
+                        print("Redis update error:", e)
 
-                # GUI display
                 if DISPLAY_GUI:
                     disp_frame = cv2.resize(frame, (1366, 720))
                     cv2.imshow("YouTube Live Stream - Signal Detection", disp_frame)
@@ -181,7 +181,7 @@ def yt_main_loop():
             time.sleep(5)
 
         except Exception as e:
-            print("❌ Exception in main loop:", e)
+            print("Exception in main loop:", e)
             time.sleep(5)
             if 'stream' in locals():
                 stream.release()
