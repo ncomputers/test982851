@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 import threading
 import torch
 
-# Check for CUDA4
+# Check for CUDA
 use_cuda = torch.cuda.is_available()
 print("CUDA is available, using GPU acceleration for OCR." if use_cuda else "CUDA not available, using CPU.")
 
@@ -98,21 +98,32 @@ def yt_main_loop():
                 else:
                     retry_count = 0
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                results = reader.readtext(gray)
+                # Crop the rightmost 25% of the frame
+                height, width = frame.shape[:2]
+                roi_start = int(width * 0.75)
+                roi = frame[:, roi_start:width]
+
+                # Convert the cropped region to grayscale
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+                # Run OCR on the cropped region
+                results = reader.readtext(gray_roi)
 
                 recognized_signals = []
                 all_signals = []
                 
                 for (bbox, text, prob) in results:
-                    (tl, _, br, _) = bbox
-                    x1, y1 = map(int, tl)
-                    _, y2 = map(int, br)
+                    # Adjust bounding box coordinates relative to the full frame
+                    (tl, tr, br, bl) = bbox
+                    # Offset the x coordinates by roi_start to map back to the full frame
+                    tl = (int(tl[0] + roi_start), int(tl[1]))
+                    br = (int(br[0] + roi_start), int(br[1]))
+                    x1, y1 = tl
+                    _, y2 = br
                     lower_text = text.lower().strip()
 
                     if is_trading_signal(lower_text):
                         all_signals.append((x1, y1, text))
-
                     elif any(fuzzy_match(lower_text, kw) for kw in SUPPLY_ZONE_KEYWORDS):
                         pass  # ignored: zone detection disabled
                     elif any(fuzzy_match(lower_text, kw) for kw in DEMAND_ZONE_KEYWORDS):
@@ -129,7 +140,6 @@ def yt_main_loop():
                         "coordinates": ""
                     }
                     first_signal_set = True
-
                 elif all_signals:
                     all_signals.sort(key=lambda s: s[0], reverse=True)
                     _, _, rtext = all_signals[0]
@@ -139,11 +149,10 @@ def yt_main_loop():
                         "coordinates": ""
                     }
 
-                # Update only if new signal
                 if last_signal_data.get("text"):
                     last_known_signal = last_signal_data
 
-                # Force all zones to be blank
+                # Clear zone detection data
                 supply_zone_data = {"min": "", "max": ""}
                 demand_zone_data = {"min": "", "max": ""}
 
@@ -167,7 +176,9 @@ def yt_main_loop():
                         print("Redis update error:", e)
 
                 if DISPLAY_GUI:
+                    # Display the full frame with an overlay rectangle highlighting the ROI
                     disp_frame = cv2.resize(frame, (1366, 720))
+                    cv2.rectangle(disp_frame, (roi_start, 0), (width, height), (0, 255, 0), 2)
                     cv2.imshow("YouTube Live Stream - Signal Detection", disp_frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         stream.release()
